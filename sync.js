@@ -1,22 +1,17 @@
 // sync.js — Project Kingslayer automated Euphoria sync
 // Runs on Railway daily at 3AM UTC
-// 1. Downloads DiscordChatExporter CLI
-// 2. Exports Euphoria channel to JSON
-// 3. Sends JSON to /api/euphoria-sync
-// 4. Logs result
 
-const { execSync, exec } = require('child_process');
+const { execSync } = require('child_process');
 const fs   = require('fs');
 const path = require('path');
 const https = require('https');
 
-// ── CONFIG (set these as Railway environment variables) ──────
-const DISCORD_TOKEN    = process.env.DISCORD_TOKEN;
-const CHANNEL_ID       = process.env.CHANNEL_ID       || '1487918314733699092';
-const KINGSLAYER_URL   = process.env.KINGSLAYER_URL    || 'https://project-kingslayer.vercel.app';
-const ADMIN_USERNAME   = process.env.ADMIN_USERNAME    || 'synchandler';
-const ADMIN_PASSWORD   = process.env.ADMIN_PASSWORD;
-const DCE_VERSION      = process.env.DCE_VERSION       || '2.43.3';
+// ── CONFIG ───────────────────────────────────────────────────
+const DISCORD_TOKEN  = process.env.DISCORD_TOKEN;
+const CHANNEL_ID     = process.env.CHANNEL_ID     || '1487918314733699092';
+const KINGSLAYER_URL = process.env.KINGSLAYER_URL  || 'https://project-kingslayer.vercel.app';
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME  || 'synchandler';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 
 const OUTPUT_DIR  = '/tmp/euphoria-export';
 const OUTPUT_FILE = path.join(OUTPUT_DIR, 'euphoria.json');
@@ -29,10 +24,12 @@ function log(msg) {
 
 function fetchJSON(url, opts = {}) {
   return new Promise((resolve, reject) => {
+    const urlObj  = new URL(url);
     const options = {
-      ...require('url').parse(url),
-      method:  opts.method  || 'GET',
-      headers: opts.headers || {},
+      hostname: urlObj.hostname,
+      path:     urlObj.pathname + urlObj.search,
+      method:   opts.method  || 'GET',
+      headers:  opts.headers || {},
     };
 
     const req = https.request(options, res => {
@@ -50,34 +47,75 @@ function fetchJSON(url, opts = {}) {
   });
 }
 
-// ── Step 1: Install DiscordChatExporter CLI ──────────────────
+function downloadFile(url, dest) {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(dest);
+    const request = (reqUrl) => {
+      https.get(reqUrl, res => {
+        // Follow redirects
+        if (res.statusCode === 301 || res.statusCode === 302) {
+          file.close();
+          return request(res.headers.location);
+        }
+        res.pipe(file);
+        file.on('finish', () => { file.close(); resolve(); });
+        file.on('error', reject);
+      }).on('error', reject);
+    };
+    request(url);
+  });
+}
+
+// ── Step 1: Install DCE ──────────────────────────────────────
 async function installDCE() {
   if (fs.existsSync(DCE_PATH)) {
-    log('DCE already installed, skipping.');
+    log('DCE already installed.');
     return;
   }
 
   log('Installing DiscordChatExporter CLI...');
-  const url = `https://github.com/Tyrrrz/DiscordChatExporter/releases/download/${DCE_VERSION}/DiscordChatExporter.CLI.linux-x64.zip`;
 
-  execSync(`curl -L "${url}" -o /tmp/dce.zip`, { stdio: 'inherit' });
-  execSync(`unzip -o /tmp/dce.zip -d /tmp/dce_extracted`, { stdio: 'inherit' });
-  execSync(`cp /tmp/dce_extracted/DiscordChatExporter.CLI ${DCE_PATH}`, { stdio: 'inherit' });
-  execSync(`chmod +x ${DCE_PATH}`, { stdio: 'inherit' });
-  log('DCE installed.');
+  // Install unzip via apt if available, otherwise use Python to unzip
+  try {
+    execSync('apt-get install -y unzip 2>/dev/null || true', { stdio: 'pipe' });
+  } catch(e) {}
+
+  const version = '2.43.3';
+  const zipUrl  = `https://github.com/Tyrrrz/DiscordChatExporter/releases/download/${version}/DiscordChatExporter.CLI.linux-x64.zip`;
+  const zipPath = '/tmp/dce.zip';
+
+  log('Downloading DCE...');
+  await downloadFile(zipUrl, zipPath);
+  log(`Downloaded: ${Math.round(fs.statSync(zipPath).size / 1024 / 1024)}MB`);
+
+  // Try unzip first, fall back to Python
+  try {
+    execSync(`unzip -o ${zipPath} -d /tmp/dce_extracted`, { stdio: 'pipe' });
+    log('Unzipped with unzip');
+  } catch(e) {
+    log('unzip not found, using Python...');
+    execSync(`python3 -c "import zipfile; zipfile.ZipFile('${zipPath}').extractall('/tmp/dce_extracted')"`, { stdio: 'inherit' });
+    log('Unzipped with Python');
+  }
+
+  execSync(`cp /tmp/dce_extracted/DiscordChatExporter.CLI ${DCE_PATH}`);
+  execSync(`chmod +x ${DCE_PATH}`);
+  log('DCE installed successfully.');
 }
 
 // ── Step 2: Export channel ───────────────────────────────────
 async function exportChannel() {
   if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+  // Clear any previous export
+  const existing = fs.readdirSync(OUTPUT_DIR).filter(f => f.endsWith('.json'));
+  existing.forEach(f => fs.unlinkSync(path.join(OUTPUT_DIR, f)));
 
   log(`Exporting channel ${CHANNEL_ID}...`);
   execSync(
-    `${DCE_PATH} export -t "${DISCORD_TOKEN}" -c ${CHANNEL_ID} -f Json -o "${OUTPUT_FILE}" --media false`,
+    `${DCE_PATH} export -t "${DISCORD_TOKEN}" -c ${CHANNEL_ID} -f Json -o "${OUTPUT_DIR}" --media false`,
     { stdio: 'inherit' }
   );
 
-  // DCE may add a timestamp suffix — find the actual output file
   const files = fs.readdirSync(OUTPUT_DIR).filter(f => f.endsWith('.json'));
   if (!files.length) throw new Error('No JSON output from DCE');
 
@@ -86,7 +124,7 @@ async function exportChannel() {
   return actualFile;
 }
 
-// ── Step 3: Login to Kingslayer ──────────────────────────────
+// ── Step 3: Login ────────────────────────────────────────────
 async function login() {
   log('Logging in to Kingslayer...');
   const res = await fetchJSON(`${KINGSLAYER_URL}/api/auth?action=login`, {
@@ -102,10 +140,11 @@ async function login() {
   return res.data.token;
 }
 
-// ── Step 4: Send to euphoria-sync ────────────────────────────
+// ── Step 4: Sync ─────────────────────────────────────────────
 async function syncToKingslayer(filePath, token) {
   log('Reading export file...');
   const jsonContent = fs.readFileSync(filePath, 'utf8');
+  log(`File size: ${Math.round(jsonContent.length / 1024)}KB`);
 
   log('Sending to /api/euphoria-sync...');
   const res = await fetchJSON(`${KINGSLAYER_URL}/api/euphoria-sync`, {
@@ -124,7 +163,7 @@ async function syncToKingslayer(filePath, token) {
 async function main() {
   log('=== Project Kingslayer — Euphoria Auto-Sync ===');
 
-  if (!DISCORD_TOKEN) { log('ERROR: DISCORD_TOKEN not set'); process.exit(1); }
+  if (!DISCORD_TOKEN)  { log('ERROR: DISCORD_TOKEN not set');  process.exit(1); }
   if (!ADMIN_PASSWORD) { log('ERROR: ADMIN_PASSWORD not set'); process.exit(1); }
 
   try {
@@ -135,7 +174,7 @@ async function main() {
 
     if (result.status === 200) {
       const d = result.data;
-      log(`Sync complete! Parsed: ${d.parsed}, Inserted: ${d.inserted}, Updated: ${d.updated}, Skipped: ${d.skipped}`);
+      log(`✔ Sync complete! Parsed: ${d.parsed}, Inserted: ${d.inserted}, Updated: ${d.updated}, Skipped: ${d.skipped}`);
       if (d.errors) log('Errors: ' + JSON.stringify(d.errors));
     } else {
       log('Sync failed: ' + JSON.stringify(result.data));
