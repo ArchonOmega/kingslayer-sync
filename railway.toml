@@ -1,0 +1,7 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "node sync.js"
+restartPolicyType = "never"
+cronSchedule = "0 3 * * *"

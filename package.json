@@ -1,0 +1,13 @@
+{
+  "name": "kingslayer-sync",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Automated Euphoria channel sync for Project Kingslayer",
+  "main": "sync.js",
+  "scripts": {
+    "start": "node sync.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
