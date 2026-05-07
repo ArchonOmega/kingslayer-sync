@@ -75,28 +75,18 @@ async function installDCE() {
 
   log('Installing DiscordChatExporter CLI...');
 
-  // Install unzip via apt if available, otherwise use Python to unzip
-  try {
-    execSync('apt-get install -y unzip 2>/dev/null || true', { stdio: 'pipe' });
-  } catch(e) {}
-
   const version = '2.43.3';
   const zipUrl  = `https://github.com/Tyrrrz/DiscordChatExporter/releases/download/${version}/DiscordChatExporter.CLI.linux-x64.zip`;
   const zipPath = '/tmp/dce.zip';
 
-  log('Downloading DCE...');
-  await downloadFile(zipUrl, zipPath);
+  // Use curl with -L to follow redirects, --max-time 120s timeout
+  log('Downloading DCE with curl...');
+  execSync(`curl -L --max-time 120 --retry 3 -o "${zipPath}" "${zipUrl}"`, { stdio: 'inherit' });
   log(`Downloaded: ${Math.round(fs.statSync(zipPath).size / 1024 / 1024)}MB`);
 
-  // Try unzip first, fall back to Python
-  try {
-    execSync(`unzip -o ${zipPath} -d /tmp/dce_extracted`, { stdio: 'pipe' });
-    log('Unzipped with unzip');
-  } catch(e) {
-    log('unzip not found, using Python...');
-    execSync(`python3 -c "import zipfile; zipfile.ZipFile('${zipPath}').extractall('/tmp/dce_extracted')"`, { stdio: 'inherit' });
-    log('Unzipped with Python');
-  }
+  // Unzip using Python (always available)
+  log('Extracting...');
+  execSync(`python3 -c "import zipfile; zipfile.ZipFile('${zipPath}').extractall('/tmp/dce_extracted')"`, { stdio: 'inherit' });
 
   execSync(`cp /tmp/dce_extracted/DiscordChatExporter.CLI ${DCE_PATH}`);
   execSync(`chmod +x ${DCE_PATH}`);
