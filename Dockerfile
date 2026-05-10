@@ -10,9 +10,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends dotnet-runtime-9.0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Download DiscordChatExporter CLI (framework-dependent, .NET assemblies only)
+# Download latest DiscordChatExporter CLI release (framework-dependent, runs on dotnet)
 RUN mkdir -p /opt/dce \
-    && wget -q https://github.com/Tyrrrz/DiscordChatExporter/releases/download/2.43.3/DiscordChatExporter.Cli.zip -O /tmp/dce.zip \
+    && wget -q https://github.com/Tyrrrz/DiscordChatExporter/releases/latest/download/DiscordChatExporter.Cli.zip -O /tmp/dce.zip \
     && unzip /tmp/dce.zip -d /opt/dce \
     && rm /tmp/dce.zip \
     && ls -la /opt/dce
