@@ -57,7 +57,7 @@ async function exportChannel() {
   // The official DCE image places the CLI at /app/DiscordChatExporter.Cli.dll
   // We invoke via dotnet runtime
   execSync(
-    'dotnet /app/DiscordChatExporter.Cli.dll export ' +
+    'dotnet /opt/dce/DiscordChatExporter.Cli.dll export ' +
     '-t "' + DISCORD_TOKEN + '" ' +
     '-c ' + CHANNEL_ID + ' ' +
     '-f Json ' +
