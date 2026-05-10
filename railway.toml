@@ -1,7 +1,7 @@
 [build]
-builder = "nixpacks"
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
 
 [deploy]
 startCommand = "node sync.js"
 restartPolicyType = "never"
-cronSchedule = "0 3 * * *"

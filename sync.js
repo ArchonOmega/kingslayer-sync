@@ -2,31 +2,26 @@
 process.stdout.write('[BOOT] sync.js starting\n');
 
 const { execSync } = require('child_process');
-process.stdout.write('[BOOT] child_process loaded\n');
-
-const fs   = require('fs');
-const path = require('path');
+const fs    = require('fs');
+const path  = require('path');
 const https = require('https');
-process.stdout.write('[BOOT] all modules loaded\n');
+
+process.stdout.write('[BOOT] modules loaded\n');
 
 // ── CONFIG ───────────────────────────────────────────────────
 const DISCORD_TOKEN  = process.env.DISCORD_TOKEN;
 const CHANNEL_ID     = process.env.CHANNEL_ID     || '1487918314733699092';
-const KINGSLAYER_URL = process.env.KINGSLAYER_URL  || 'https://project-kingslayer.vercel.app';
-const ADMIN_USERNAME = process.env.ADMIN_USERNAME  || 'synchandler';
+const KINGSLAYER_URL = process.env.KINGSLAYER_URL || 'https://project-kingslayer.vercel.app';
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'synchandler';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 
-process.stdout.write('[BOOT] DISCORD_TOKEN set: ' + (DISCORD_TOKEN ? 'YES' : 'NO') + '\n');
-process.stdout.write('[BOOT] ADMIN_PASSWORD set: ' + (ADMIN_PASSWORD ? 'YES' : 'NO') + '\n');
-process.stdout.write('[BOOT] CHANNEL_ID: ' + CHANNEL_ID + '\n');
-process.stdout.write('[BOOT] KINGSLAYER_URL: ' + KINGSLAYER_URL + '\n');
+process.stdout.write('[BOOT] DISCORD_TOKEN: ' + (DISCORD_TOKEN ? 'YES' : 'NO') + '\n');
+process.stdout.write('[BOOT] ADMIN_PASSWORD: ' + (ADMIN_PASSWORD ? 'YES' : 'NO') + '\n');
 
 const OUTPUT_DIR = '/tmp/euphoria-export';
-const DCE_PATH   = '/tmp/DiscordChatExporter.CLI';
 
 function log(msg) {
-  const line = '[' + new Date().toISOString() + '] ' + msg + '\n';
-  process.stdout.write(line);
+  process.stdout.write('[' + new Date().toISOString() + '] ' + msg + '\n');
 }
 
 function fetchJSON(url, opts) {
@@ -53,45 +48,33 @@ function fetchJSON(url, opts) {
   });
 }
 
-async function installDCE() {
-  if (fs.existsSync(DCE_PATH)) {
-    log('DCE already installed.');
-    return;
-  }
-  log('Installing DiscordChatExporter CLI...');
-  var version = '2.43.3';
-  var zipUrl  = 'https://github.com/Tyrrrz/DiscordChatExporter/releases/download/' + version + '/DiscordChatExporter.CLI.linux-x64.zip';
-  var zipPath = '/tmp/dce.zip';
-
-  log('Downloading DCE with curl...');
-  execSync('curl -L --max-time 120 --retry 3 -o "' + zipPath + '" "' + zipUrl + '"', { stdio: 'inherit' });
-  log('Downloaded: ' + Math.round(fs.statSync(zipPath).size / 1024 / 1024) + 'MB');
-
-  log('Extracting...');
-  execSync('python3 -c "import zipfile; zipfile.ZipFile(\'' + zipPath + '\').extractall(\'/tmp/dce_extracted\')"', { stdio: 'inherit' });
-  execSync('cp /tmp/dce_extracted/DiscordChatExporter.CLI ' + DCE_PATH);
-  execSync('chmod +x ' + DCE_PATH);
-  log('DCE installed.');
-}
-
 async function exportChannel() {
   if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
-  var existing = fs.readdirSync(OUTPUT_DIR).filter(function(f) { return f.endsWith('.json'); });
-  existing.forEach(function(f) { fs.unlinkSync(path.join(OUTPUT_DIR, f)); });
+  fs.readdirSync(OUTPUT_DIR).filter(function(f) { return f.endsWith('.json'); })
+    .forEach(function(f) { fs.unlinkSync(path.join(OUTPUT_DIR, f)); });
 
   log('Exporting channel ' + CHANNEL_ID + '...');
-  execSync(DCE_PATH + ' export -t "' + DISCORD_TOKEN + '" -c ' + CHANNEL_ID + ' -f Json -o "' + OUTPUT_DIR + '" --media false', { stdio: 'inherit' });
+  // The official DCE image places the CLI at /app/DiscordChatExporter.Cli.dll
+  // We invoke via dotnet runtime
+  execSync(
+    'dotnet /app/DiscordChatExporter.Cli.dll export ' +
+    '-t "' + DISCORD_TOKEN + '" ' +
+    '-c ' + CHANNEL_ID + ' ' +
+    '-f Json ' +
+    '-o "' + OUTPUT_DIR + '" ' +
+    '--media false',
+    { stdio: 'inherit' }
+  );
 
   var files = fs.readdirSync(OUTPUT_DIR).filter(function(f) { return f.endsWith('.json'); });
   if (!files.length) throw new Error('No JSON output from DCE');
-
-  var actualFile = path.join(OUTPUT_DIR, files[0]);
-  log('Export complete: ' + actualFile + ' (' + Math.round(fs.statSync(actualFile).size / 1024) + 'KB)');
-  return actualFile;
+  var file = path.join(OUTPUT_DIR, files[0]);
+  log('Exported: ' + Math.round(fs.statSync(file).size / 1024) + 'KB');
+  return file;
 }
 
 async function login() {
-  log('Logging in...');
+  log('Logging in to Kingslayer...');
   var res = await fetchJSON(KINGSLAYER_URL + '/api/auth?action=login', {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -99,45 +82,36 @@ async function login() {
   });
   if (res.status !== 200 || !res.data.token)
     throw new Error('Login failed: ' + JSON.stringify(res.data));
-  log('Login successful.');
+  log('Logged in.');
   return res.data.token;
-}
-
-async function syncToKingslayer(filePath, token) {
-  log('Reading export file...');
-  var jsonContent = fs.readFileSync(filePath, 'utf8');
-  log('File size: ' + Math.round(jsonContent.length / 1024) + 'KB');
-
-  log('Sending to /api/euphoria-sync...');
-  var res = await fetchJSON(KINGSLAYER_URL + '/api/euphoria-sync', {
-    method:  'POST',
-    headers: {
-      'Content-Type':  'application/json',
-      'Authorization': 'Bearer ' + token,
-    },
-    body: JSON.stringify({ json: jsonContent, source: 'scheduled' }),
-  });
-  return res;
 }
 
 async function main() {
   log('=== Project Kingslayer — Euphoria Auto-Sync ===');
-
   if (!DISCORD_TOKEN)  { log('ERROR: DISCORD_TOKEN not set');  process.exit(1); }
   if (!ADMIN_PASSWORD) { log('ERROR: ADMIN_PASSWORD not set'); process.exit(1); }
 
   try {
-    await installDCE();
-    var filePath = await exportChannel();
-    var token    = await login();
-    var result   = await syncToKingslayer(filePath, token);
+    var file  = await exportChannel();
+    var token = await login();
 
-    if (result.status === 200) {
-      var d = result.data;
-      log('Sync complete! Parsed: ' + d.parsed + ', Inserted: ' + d.inserted + ', Updated: ' + d.updated + ', Skipped: ' + d.skipped);
+    log('Sending to euphoria-sync...');
+    var content = fs.readFileSync(file, 'utf8');
+    var res = await fetchJSON(KINGSLAYER_URL + '/api/euphoria-sync', {
+      method:  'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'Authorization': 'Bearer ' + token,
+      },
+      body: JSON.stringify({ json: content, source: 'scheduled' }),
+    });
+
+    if (res.status === 200) {
+      var d = res.data;
+      log('Sync complete! Parsed:' + d.parsed + ' New:' + d.inserted + ' Updated:' + d.updated + ' Skipped:' + d.skipped);
       if (d.errors) log('Errors: ' + JSON.stringify(d.errors));
     } else {
-      log('Sync failed: ' + JSON.stringify(result.data));
+      log('Sync failed: ' + JSON.stringify(res.data));
       process.exit(1);
     }
 
