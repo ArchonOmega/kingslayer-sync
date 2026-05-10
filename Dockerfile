@@ -1,12 +1,8 @@
-# Stage 1: pull the official DCE image just to extract its files
-FROM tyrrrz/discordchatexporter:stable AS dce_source
-
-# Stage 2: Node.js base with .NET runtime added
 FROM node:20-bookworm-slim
 
-# Install .NET runtime — DCE needs it to execute
+# Install .NET 9 runtime + tools needed for downloading DCE
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends wget ca-certificates \
+    && apt-get install -y --no-install-recommends wget ca-certificates unzip \
     && wget -q https://packages.microsoft.com/config/debian/12/packages-microsoft-prod.deb -O /tmp/pmp.deb \
     && dpkg -i /tmp/pmp.deb \
     && rm /tmp/pmp.deb \
@@ -14,8 +10,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends dotnet-runtime-9.0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy DCE binaries from the official image — try both possible paths
-COPY --from=dce_source /opt/app /opt/dce
+# Download DiscordChatExporter CLI (framework-dependent, .NET assemblies only)
+RUN mkdir -p /opt/dce \
+    && wget -q https://github.com/Tyrrrz/DiscordChatExporter/releases/download/2.43.3/DiscordChatExporter.Cli.zip -O /tmp/dce.zip \
+    && unzip /tmp/dce.zip -d /opt/dce \
+    && rm /tmp/dce.zip \
+    && ls -la /opt/dce
 
 # Build our sync app
 WORKDIR /sync
