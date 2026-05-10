@@ -1,24 +1,23 @@
 FROM node:20-bookworm-slim
 
-# Install .NET 9 runtime
+# Install runtime libraries needed by DCE's self-contained build
+# libicu is required for globalization features in .NET
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends wget curl ca-certificates unzip libicu-dev \
-    && wget -q https://packages.microsoft.com/config/debian/12/packages-microsoft-prod.deb -O /tmp/pmp.deb \
-    && dpkg -i /tmp/pmp.deb \
-    && rm /tmp/pmp.deb \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends dotnet-runtime-9.0 \
+    && apt-get install -y --no-install-recommends \
+        curl ca-certificates unzip \
+        libicu-dev libssl3 libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
-# Download framework-dependent DCE (.NET assemblies only, runs on our dotnet runtime)
-# Use curl -L to follow GitHub's redirect to release-assets.githubusercontent.com
+# Download the linux-x64 (glibc) self-contained DCE build
+# This includes its own .NET runtime so we don't need to install one
 RUN mkdir -p /opt/dce \
     && curl -L --fail --retry 3 --max-time 120 \
         -o /tmp/dce.zip \
-        https://github.com/Tyrrrz/DiscordChatExporter/releases/latest/download/DiscordChatExporter.Cli.zip \
+        https://github.com/Tyrrrz/DiscordChatExporter/releases/latest/download/DiscordChatExporter.Cli.linux-x64.zip \
     && ls -la /tmp/dce.zip \
     && unzip /tmp/dce.zip -d /opt/dce \
     && rm /tmp/dce.zip \
+    && chmod +x /opt/dce/DiscordChatExporter.Cli \
     && ls -la /opt/dce
 
 # Build our sync app
