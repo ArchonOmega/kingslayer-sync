@@ -1,10 +1,15 @@
-// sync.js — Project Kingslayer automated Euphoria sync
+// sync.js — Project Kingslayer Euphoria sync service
+// Runs as a long-lived web service on Railway.
+// Internal cron fires daily at 3AM UTC. HTTP /run endpoint allows manual triggers.
+
 process.stdout.write('[BOOT] sync.js starting\n');
 
 const { execSync } = require('child_process');
 const fs    = require('fs');
 const path  = require('path');
 const https = require('https');
+const http  = require('http');
+const cron  = require('node-cron');
 
 process.stdout.write('[BOOT] modules loaded\n');
 
@@ -14,11 +19,17 @@ const CHANNEL_ID     = process.env.CHANNEL_ID     || '1487918314733699092';
 const KINGSLAYER_URL = process.env.KINGSLAYER_URL || 'https://project-kingslayer.vercel.app';
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'synchandler';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+const TRIGGER_SECRET = process.env.TRIGGER_SECRET || 'change-me';
+const PORT           = process.env.PORT            || 3000;
 
 process.stdout.write('[BOOT] DISCORD_TOKEN: ' + (DISCORD_TOKEN ? 'YES' : 'NO') + '\n');
 process.stdout.write('[BOOT] ADMIN_PASSWORD: ' + (ADMIN_PASSWORD ? 'YES' : 'NO') + '\n');
 
 const OUTPUT_DIR = '/tmp/euphoria-export';
+
+let syncInProgress = false;
+let lastSyncResult = null;
+let lastSyncTime   = null;
 
 function log(msg) {
   process.stdout.write('[' + new Date().toISOString() + '] ' + msg + '\n');
@@ -53,14 +64,23 @@ async function exportChannel() {
   fs.readdirSync(OUTPUT_DIR).filter(function(f) { return f.endsWith('.json'); })
     .forEach(function(f) { fs.unlinkSync(path.join(OUTPUT_DIR, f)); });
 
-  log('Exporting channel ' + CHANNEL_ID + '...');
-  // The official DCE image places the CLI at /app/DiscordChatExporter.Cli.dll
-  // We invoke via dotnet runtime
+  // Rolling window: only export the last SYNC_WINDOW_DAYS days of messages.
+  // This keeps the payload small so it never exceeds Vercel's request limit,
+  // no matter how large the total channel history grows. The sync dedupes by
+  // region and only applies newer timestamps, so not re-sending old history
+  // is safe — those lands are already in the database.
+  var windowDays = parseInt(process.env.SYNC_WINDOW_DAYS || '14', 10);
+  var afterDate = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000);
+  // DCE accepts an ISO-style date; use YYYY-MM-DD.
+  var afterStr = afterDate.toISOString().slice(0, 10);
+
+  log('Exporting channel ' + CHANNEL_ID + ' (messages after ' + afterStr + ')...');
   execSync(
     '/opt/dce/DiscordChatExporter.Cli export ' +
     '-t "' + DISCORD_TOKEN + '" ' +
     '-c ' + CHANNEL_ID + ' ' +
     '-f Json ' +
+    '--after "' + afterStr + '" ' +
     '-o "' + OUTPUT_DIR + '" ' +
     '--media false',
     { stdio: 'inherit' }
@@ -86,15 +106,18 @@ async function login() {
   return res.data.token;
 }
 
-async function main() {
-  log('=== Project Kingslayer — Euphoria Auto-Sync ===');
-  if (!DISCORD_TOKEN)  { log('ERROR: DISCORD_TOKEN not set');  process.exit(1); }
-  if (!ADMIN_PASSWORD) { log('ERROR: ADMIN_PASSWORD not set'); process.exit(1); }
+async function runSync(source) {
+  if (syncInProgress) {
+    log('Sync already in progress — skipping.');
+    return { ok: false, error: 'Sync already in progress' };
+  }
+  syncInProgress = true;
+  source = source || 'scheduled';
+  log('=== Starting sync (source=' + source + ') ===');
 
   try {
     var file  = await exportChannel();
     var token = await login();
-
     log('Sending to euphoria-sync...');
     var content = fs.readFileSync(file, 'utf8');
     var res = await fetchJSON(KINGSLAYER_URL + '/api/euphoria-sync', {
@@ -103,25 +126,83 @@ async function main() {
         'Content-Type':  'application/json',
         'Authorization': 'Bearer ' + token,
       },
-      body: JSON.stringify({ json: content, source: 'scheduled' }),
+      body: JSON.stringify({ json: content, source: source }),
     });
 
     if (res.status === 200) {
       var d = res.data;
       log('Sync complete! Parsed:' + d.parsed + ' New:' + d.inserted + ' Updated:' + d.updated + ' Skipped:' + d.skipped);
-      if (d.errors) log('Errors: ' + JSON.stringify(d.errors));
+      lastSyncResult = d;
+      lastSyncTime   = new Date().toISOString();
+      fs.rmSync(OUTPUT_DIR, { recursive: true, force: true });
+      return { ok: true, ...d };
     } else {
       log('Sync failed: ' + JSON.stringify(res.data));
-      process.exit(1);
+      lastSyncResult = { error: res.data };
+      lastSyncTime   = new Date().toISOString();
+      return { ok: false, error: res.data };
     }
-
-    fs.rmSync(OUTPUT_DIR, { recursive: true, force: true });
-    log('Done.');
   } catch(err) {
     log('FATAL: ' + err.message);
     console.error(err);
-    process.exit(1);
+    lastSyncResult = { error: err.message };
+    lastSyncTime   = new Date().toISOString();
+    return { ok: false, error: err.message };
+  } finally {
+    syncInProgress = false;
   }
 }
 
-main();
+// ── HTTP server ──────────────────────────────────────────────
+const server = http.createServer(function(req, res) {
+  // Health check / status
+  if (req.url === '/' && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({
+      service: 'kingslayer-sync',
+      status:  syncInProgress ? 'syncing' : 'idle',
+      lastSyncTime,
+      lastSyncResult,
+    }));
+  }
+
+  // Manual trigger
+  if (req.url.startsWith('/run') && req.method === 'POST') {
+    var url = new URL(req.url, 'http://localhost');
+    var secret = req.headers['x-trigger-secret'] || url.searchParams.get('secret');
+
+    if (secret !== TRIGGER_SECRET) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'Unauthorized' }));
+    }
+
+    log('Manual trigger received');
+    // Fire and respond immediately — don't make caller wait for full sync
+    runSync('manual').then(function(result) {
+      log('Manual sync completed.');
+    }).catch(function(err) {
+      log('Manual sync errored: ' + err.message);
+    });
+
+    res.writeHead(202, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({
+      ok:      true,
+      message: 'Sync triggered. Check sync history on the Kingslayer site for results.',
+    }));
+  }
+
+  res.writeHead(404);
+  res.end('Not found');
+});
+
+server.listen(PORT, function() {
+  log('HTTP server listening on port ' + PORT);
+});
+
+// ── Daily cron at 3AM UTC ────────────────────────────────────
+cron.schedule('0 3 * * *', function() {
+  log('Scheduled cron firing.');
+  runSync('scheduled');
+}, { timezone: 'UTC' });
+
+log('Service ready. Daily sync at 03:00 UTC. Manual trigger via POST /run.');
